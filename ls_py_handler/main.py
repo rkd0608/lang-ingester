@@ -16,4 +16,4 @@ async def root():
     """
     Root endpoint to verify the API is running.
     """
-    return {"message": "Welcome to LS Python Handler API"}
+    return {"message": "LS Run Handler API"}
