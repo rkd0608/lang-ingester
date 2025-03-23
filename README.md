@@ -22,6 +22,51 @@ make server
 
 The API will be available at http://localhost:8000
 
+### Example API Usage
+
+#### Creating Runs
+
+```bash
+# Create a new run
+curl -X POST http://localhost:8000/runs \
+  -H "Content-Type: application/json" \
+  -d '[
+    {
+      "trace_id": "944ce838-b5c5-4628-8f23-089fbda8b9e3",
+      "name": "Weather Query",
+      "inputs": {"query": "What is the weather in San Francisco?"},
+      "outputs": {"response": "It is currently 65°F and sunny in San Francisco."},
+      "metadata": {"model": "gpt-4", "temperature": 0.7, "tokens": 42}
+    }
+  ]'
+```
+
+Response:
+```json
+{
+  "ids": ["<generated-uuid>"]
+}
+```
+
+#### Retrieving a Run
+
+```bash
+# Get a run by ID (replace <run-id> with an actual UUID)
+curl -X GET http://localhost:8000/runs/<run-id>
+```
+
+Response:
+```json
+{
+  "id": "<run-id>",
+  "trace_id": "944ce838-b5c5-4628-8f23-089fbda8b9e3",
+  "name": "Weather Query",
+  "inputs": {"query": "What is the weather in San Francisco?"},
+  "outputs": {"response": "It is currently 65°F and sunny in San Francisco."},
+  "metadata": {"model": "gpt-4", "temperature": 0.7, "tokens": 42}
+}
+```
+
 ## Setup Details
 
 This project uses Poetry for dependency management.
@@ -60,6 +105,21 @@ make server
 
 # Or manually start the server
 poetry run uvicorn ls_py_handler.main:app --reload
+```
+
+## Code Quality
+
+This project uses Ruff for linting and formatting Python code.
+
+```bash
+# Format code
+make format
+
+# Check code for linting issues
+make lint
+
+# Automatically fix linting issues when possible
+make lint-fix
 ```
 
 ## API Documentation
