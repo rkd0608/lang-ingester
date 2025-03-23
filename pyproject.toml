@@ -22,10 +22,12 @@ pydantic-settings = "^2.8.1"
 orjson = "^3.10.15"
 
 [tool.poetry.group.dev.dependencies]
-pytest = "^7.4.3"
+pytest = "^8.1.0"
 pytest-asyncio = "^0.21.1"
 httpx = "^0.25.0"
 ruff = "^0.2.2"
+pytest-benchmark = "^5.1.0"
+pytest-memray = "^1.7.0"
 
 [build-system]
 requires = ["poetry-core"]

@@ -1,4 +1,4 @@
-.PHONY: db-up db-down db-migrate db-downgrade db-migrate-test server format lint lint-fix test test-setup
+.PHONY: db-up db-down db-migrate db-downgrade db-migrate-test server format lint lint-fix test test-setup benchmark benchmark-compare benchmark-compare-save memprofile
 
 # Start all database services defined in docker-compose-db.yaml
 db-up:
@@ -12,7 +12,7 @@ db-down:
 db-migrate:
 	poetry run alembic upgrade head
 
-# Run database migrations with test environment
+# Run migrations with test environment
 db-migrate-test:
 	RUN_HANDLER_ENV=test poetry run alembic upgrade head
 
@@ -55,3 +55,13 @@ test-setup:
 # Run tests with test environment
 test: test-setup
 	RUN_HANDLER_ENV=test poetry run pytest -s
+
+# Run performance benchmarks
+benchmark: test-setup
+	@echo "Running performance benchmarks..."
+	RUN_HANDLER_ENV=test poetry run pytest tests/benchmarks/test_run_performance.py -v --benchmark-save=baseline --benchmark-compare
+
+# Run memory profiling
+memprofile: test-setup
+	@echo "Running memory profiling..."
+	RUN_HANDLER_ENV=test poetry run pytest tests/benchmarks/test_run_performance.py -v --memray

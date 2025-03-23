@@ -163,3 +163,39 @@ The application uses environment-specific configuration:
 - Testing: Uses the `.env.test` file when `RUN_HANDLER_ENV=test` is set
 
 This allows tests to run with isolated resources without affecting your development environment.
+
+## Benchmarking and Profiling
+
+The project includes tools for performance benchmarking and memory profiling to help identify bottlenecks and optimize resource usage.
+
+### Performance Benchmarks
+
+Performance benchmarks measure execution time of key operations using `pytest-benchmark`. The benchmarks are designed to isolate the API request handling time from data preparation and JSON serialization.
+
+```bash
+# Run performance benchmarks
+make benchmark
+```
+
+This will:
+1. Set up a clean test environment
+2. Run the benchmark tests
+3. Save the results to `.benchmarks` directory for comparison with future runs
+
+Example benchmark scenarios:
+- Processing 500 runs with 10KB of data per field
+- Processing 50 runs with 100KB of data per field
+
+### Memory Profiling
+
+Memory profiling using `pytest-memray` helps identify memory usage.
+
+```bash
+# Run memory profiling
+make memprofile
+```
+
+Memory profiling results will show:
+- Peak memory usage for different operations
+- Memory allocation patterns
+- Memory-intensive functions and call paths

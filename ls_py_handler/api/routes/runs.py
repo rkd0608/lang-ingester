@@ -12,9 +12,6 @@ from ls_py_handler.config.settings import settings
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
-print(settings.DB_NAME)
-print(settings.S3_BUCKET_NAME)
-
 
 class Run(BaseModel):
     id: Optional[UUID4] = Field(default_factory=uuid.uuid4)
