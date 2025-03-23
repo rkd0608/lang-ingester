@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "ls-py-handler"
+version = "0.1.0"
+description = "A simple FastAPI server with run endpoints"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "ls_py_handler"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.104.0"
+uvicorn = "^0.23.2"
+pydantic = "^2.4.2"
+uuid = "^1.30"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.3"
+pytest-asyncio = "^0.21.1"
+httpx = "^0.25.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
