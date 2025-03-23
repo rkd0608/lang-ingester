@@ -107,7 +107,7 @@ make server
 poetry run uvicorn ls_py_handler.main:app --reload
 ```
 
-## Code Quality
+## Linting and Formatting
 
 This project uses Ruff for linting and formatting Python code.
 
@@ -130,6 +130,36 @@ Once the server is running, you can access the auto-generated API documentation 
 
 ## Testing
 
+The project uses pytest for testing and includes a dedicated test environment configuration.
+
 ```bash
-# Run tests
-poetry run pytest
+# Run tests (this automatically sets up the test environment)
+make test
+```
+
+The test command will:
+1. Set up a clean test environment (drop and recreate the test database and S3 bucket)
+2. Run migrations on the test database
+3. Execute all tests with the test environment settings
+
+### Test Environment Setup
+
+The test environment uses:
+- A separate database (`postgres_test`)
+- A separate S3 bucket (`runs-test`)
+- Environment variables from `.env.test`
+
+You can manually set up the test environment without running tests:
+
+```bash
+# Just set up the test environment
+make test-setup
+```
+
+### Environment Configuration
+
+The application uses environment-specific configuration:
+- Development: Uses the default `.env` file
+- Testing: Uses the `.env.test` file when `RUN_HANDLER_ENV=test` is set
+
+This allows tests to run with isolated resources without affecting your development environment.

@@ -12,6 +12,9 @@ from ls_py_handler.config.settings import settings
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
+print(settings.DB_NAME)
+print(settings.S3_BUCKET_NAME)
+
 
 class Run(BaseModel):
     id: Optional[UUID4] = Field(default_factory=uuid.uuid4)
@@ -146,7 +149,6 @@ async def get_run(
 
     # Function to parse S3 reference
     def parse_s3_ref(ref):
-        print(f"Parsing S3 reference: {ref}")
         if not ref or not ref.startswith("s3://"):
             return None, None, None, None
 
@@ -156,10 +158,8 @@ async def get_run(
 
         if "#" in ref:
             offset_part = ref.split("#")[1]
-            print(f"Offset part: {offset_part}")
             if ":" in offset_part and "/" in offset_part:
                 offsets, field = offset_part.split("/")
-                print(f"Offsets: {offsets}, Field: {field}")
                 start_offset, end_offset = map(int, offsets.split(":"))
                 return bucket, key, (start_offset, end_offset), field
 
