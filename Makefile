@@ -1,4 +1,4 @@
-.PHONY: db-up db-down db-migrate db-downgrade server
+.PHONY: db-up db-down db-migrate db-downgrade server format lint lint-fix
 
 # Start all database services defined in docker-compose-db.yaml
 db-up:
@@ -15,6 +15,18 @@ db-migrate:
 # Downgrade database to previous migration
 db-downgrade:
 	poetry run alembic downgrade -1
+
+# Format code using Ruff
+format:
+	poetry run ruff format ls_py_handler tests
+
+# Lint code using Ruff
+lint:
+	poetry run ruff check ls_py_handler tests
+
+# Automatically fix linting issues using Ruff
+lint-fix:
+	poetry run ruff check --fix ls_py_handler tests
 
 # Run migrations and start the server
 server: db-migrate

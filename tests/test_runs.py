@@ -1,6 +1,8 @@
+import uuid
+
 import pytest
 from httpx import AsyncClient
-import uuid
+
 from ls_py_handler.main import app
 
 
@@ -23,7 +25,7 @@ async def test_get_run():
     """
     # Generate a random UUID for testing
     test_uuid = uuid.uuid4()
-    
+
     async with AsyncClient(app=app, base_url="http://test") as client:
         response = await client.get(f"/runs/{test_uuid}")
         assert response.status_code == 200

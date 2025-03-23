@@ -1,11 +1,12 @@
-import orjson
+import asyncio
 import uuid
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
 import asyncpg
+import orjson
 from aiobotocore.session import get_session
-from fastapi import APIRouter, status, HTTPException, Depends
-from pydantic import BaseModel, Field, UUID4
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import UUID4, BaseModel, Field
 
 from ls_py_handler.config.settings import settings
 
@@ -28,7 +29,7 @@ async def get_db_conn():
         password=settings.DB_PASSWORD,
         database=settings.DB_NAME,
         host=settings.DB_HOST,
-        port=settings.DB_PORT
+        port=settings.DB_PORT,
     )
     try:
         yield conn
@@ -40,60 +41,66 @@ async def get_s3_client():
     """Get an S3 client for MinIO."""
     session = get_session()
     async with session.create_client(
-        's3',
+        "s3",
         endpoint_url=settings.S3_ENDPOINT_URL,
         aws_access_key_id=settings.S3_ACCESS_KEY,
         aws_secret_access_key=settings.S3_SECRET_KEY,
-        region_name=settings.S3_REGION
+        region_name=settings.S3_REGION,
     ) as client:
         yield client
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-async def create_run(
+async def create_runs(
     runs: List[Run],
     db: asyncpg.Connection = Depends(get_db_conn),
-    s3: Any = Depends(get_s3_client)
+    s3: Any = Depends(get_s3_client),
 ):
     """
     Create new runs in batch.
-    
+
     Takes a JSON array of Run objects, uploads them to MinIO,
-    and stores references in PostgreSQL.
+    and stores references to certain fields in PostgreSQL.
     """
     if not runs:
         raise HTTPException(status_code=400, detail="No runs provided")
-    
+
     # Prepare the batch for S3 upload
     batch_id = str(uuid.uuid4())
-    batch_data = orjson.dumps([run.model_dump() for run in runs])
-    
-    # Upload batch to MinIO
+
+    run_dicts = [run.model_dump() for run in runs]
+    batch_data = orjson.dumps(run_dicts)
+
     object_key = f"batches/{batch_id}.json"
-    
+
     # Upload the batch data
     await s3.put_object(
         Bucket=settings.S3_BUCKET_NAME,
         Key=object_key,
-        Body=batch_data
+        Body=batch_data,
+        ContentType="application/json",
     )
-    
+
     # Store references in PG
     inserted_ids = []
+
     for i, run in enumerate(runs):
-        # Calculate offsets in the JSON array for each run
-        run_json = orjson.dumps(run.model_dump())
-        # Find the position of this run in the batch data
-        # Note: with binary data we need to search differently
-        run_str = run_json.decode('utf-8')
-        batch_str = batch_data.decode('utf-8')
-        start_offset = batch_str.find(run_str)
-        end_offset = start_offset + len(run_str)
-        
-        # Store in database with S3 references
-        inputs_ref = f"s3://{settings.S3_BUCKET_NAME}/{object_key}#{start_offset}:{end_offset}/inputs"
-        outputs_ref = f"s3://{settings.S3_BUCKET_NAME}/{object_key}#{start_offset}:{end_offset}/outputs"
-        metadata_ref = f"s3://{settings.S3_BUCKET_NAME}/{object_key}#{start_offset}:{end_offset}/metadata"
+        run_dict = run_dicts[i]
+
+        # Calculate specific offsets for each field in the JSON using a loop
+        field_refs = {}
+        for field in ["inputs", "outputs", "metadata"]:
+            field_json_data = orjson.dumps(run_dict.get(field, {}))
+            field_start_in_run = batch_data.find(field_json_data)
+
+            if field_start_in_run != -1:
+                field_start = field_start_in_run
+                field_end = field_start + len(field_json_data)
+                field_refs[
+                    field
+                ] = f"s3://{settings.S3_BUCKET_NAME}/{object_key}#{field_start}:{field_end}/{field}"
+            else:
+                field_refs[field] = ""
 
         run_id = await db.fetchval(
             """
@@ -101,10 +108,15 @@ async def create_run(
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING id
             """,
-            run.id, run.trace_id, run.name, inputs_ref, outputs_ref, metadata_ref
+            run.id,
+            run.trace_id,
+            run.name,
+            field_refs["inputs"],
+            field_refs["outputs"],
+            field_refs["metadata"],
         )
         inserted_ids.append(str(run_id))
-    
+
     return {"status": "created", "run_ids": inserted_ids}
 
 
@@ -112,65 +124,88 @@ async def create_run(
 async def get_run(
     run_id: UUID4,
     db: asyncpg.Connection = Depends(get_db_conn),
-    s3: Any = Depends(get_s3_client)
+    s3: Any = Depends(get_s3_client),
 ):
     """
     Get a run by its ID.
     """
-    # Fetch the run from the database
+    # Fetch the run from the PG
     row = await db.fetchrow(
         """
         SELECT id, trace_id, name, inputs, outputs, metadata
         FROM runs
         WHERE id = $1
         """,
-        run_id
+        run_id,
     )
-    
+
     if not row:
         raise HTTPException(status_code=404, detail=f"Run with ID {run_id} not found")
-    
-    # Parse S3 references
+
     run_data = dict(row)
-    
-    # Function to fetch data from S3 based on reference
-    async def fetch_from_s3(ref):
-        if not ref or not ref.startswith('s3://'):
-            return {}
-        
-        # Parse the S3 reference
-        parts = ref.split('/')
+
+    # Function to parse S3 reference
+    def parse_s3_ref(ref):
+        print(f"Parsing S3 reference: {ref}")
+        if not ref or not ref.startswith("s3://"):
+            return None, None, None, None
+
+        parts = ref.split("/")
         bucket = parts[2]
-        key = '/'.join(parts[3:]).split('#')[0]
-        
-        # Extract offsets and field
-        offset_part = ref.split('#')[1] if '#' in ref else None
-        field = offset_part.split('/')[1] if offset_part and '/' in offset_part else None
-        
-        # Get the object from S3
-        response = await s3.get_object(Bucket=bucket, Key=key)
-        async with response['Body'] as stream:
-            data = await stream.read()
-            json_data = orjson.loads(data)
-            
-            # If it's a batch, find the specific run and field
-            if isinstance(json_data, list) and offset_part:
-                for item in json_data:
-                    if str(item.get('id')) == str(run_id):
-                        return item.get(field, {}) if field else item
-            
-            return json_data
-    
-    # Fetch the actual data from MinIO
-    inputs = await fetch_from_s3(run_data['inputs'])
-    outputs = await fetch_from_s3(run_data['outputs'])
-    metadata = await fetch_from_s3(run_data['metadata'])
-    
+        key = "/".join(parts[3:]).split("#")[0]
+
+        if "#" in ref:
+            offset_part = ref.split("#")[1]
+            print(f"Offset part: {offset_part}")
+            if ":" in offset_part and "/" in offset_part:
+                offsets, field = offset_part.split("/")
+                print(f"Offsets: {offsets}, Field: {field}")
+                start_offset, end_offset = map(int, offsets.split(":"))
+                return bucket, key, (start_offset, end_offset), field
+
+        return bucket, key, None, None
+
+    # Function to fetch data from S3 based on reference with byte range
+    async def fetch_from_s3(ref):
+        if not ref or not ref.startswith("s3://"):
+            return {}
+
+        bucket, key, offsets, field = parse_s3_ref(ref)
+        if not bucket or not key or not offsets:
+            return {}
+
+        start_offset, end_offset = offsets
+        byte_range = f"bytes={start_offset}-{end_offset-1}"
+
+        try:
+            # Fetch only the required byte range
+            response = await s3.get_object(Bucket=bucket, Key=key, Range=byte_range)
+            async with response["Body"] as stream:
+                data = await stream.read()
+            try:
+                # The data should be a valid JSON object corresponding to the field
+                # (inputs, outputs, or metadata) without needing further extraction
+                return orjson.loads(data)
+            except Exception as parse_error:
+                print(f"Error parsing JSON fragment: {parse_error}")
+                print(f"Problematic data: {data}")
+                return {}
+
+        except Exception as e:
+            print(f"Error fetching S3 object with range: {e}")
+            return {}
+
+    inputs, outputs, metadata = await asyncio.gather(
+        fetch_from_s3(run_data["inputs"]),
+        fetch_from_s3(run_data["outputs"]),
+        fetch_from_s3(run_data["metadata"]),
+    )
+
     return {
-        "id": str(run_data['id']),
-        "trace_id": str(run_data['trace_id']),
-        "name": run_data['name'],
+        "id": str(run_data["id"]),
+        "trace_id": str(run_data["trace_id"]),
+        "name": run_data["name"],
         "inputs": inputs,
         "outputs": outputs,
-        "metadata": metadata
+        "metadata": metadata,
     }
