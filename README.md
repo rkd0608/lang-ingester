@@ -1,6 +1,6 @@
 # ls-py-handler
 
-A simple FastAPI server with run endpoints for handling asynchronous operations.
+A simple FastAPI server with endpoints for ingesting and fetching runs.
 
 ## Features
 
