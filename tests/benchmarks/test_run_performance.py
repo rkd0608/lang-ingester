@@ -14,20 +14,20 @@ def generate_large_string(size_kb=10):
     """Generate a random string of approximately size_kb kilobytes."""
     # 1 KB is roughly 1024 characters
     chars = string.ascii_letters + string.digits
-    return ''.join(random.choice(chars) for _ in range(size_kb * 1024))
+    return "".join(random.choice(chars) for _ in range(size_kb * 1024))
 
 
 def generate_large_json_dict(size_kb=10):
     """Generate a JSON-serializable dictionary of approximately size_kb kilobytes."""
     result = {}
     large_string = generate_large_string(size_kb)
-    
+
     # Split the string into chunks to create dictionary entries
     chunk_size = 100
     for i in range(0, len(large_string), chunk_size):
         key = f"key_{i//chunk_size}"
-        result[key] = large_string[i:i+chunk_size]
-    
+        result[key] = large_string[i : i + chunk_size]
+
     return result
 
 
@@ -52,10 +52,11 @@ def generate_batch_run_dicts(batch_size=100, size_kb=10):
 def aio_benchmark(benchmark):
     """
     A fixture that allows benchmarking of async functions.
-    
+
     This fixture creates a synchronous wrapper around async functions
     that can be used with pytest-benchmark.
     """
+
     def _wrapper(func, *args, **kwargs):
         # Create a synchronous wrapper for the async function
         def _sync_wrapper():
@@ -67,7 +68,7 @@ def aio_benchmark(benchmark):
             finally:
                 loop.close()
                 asyncio.set_event_loop(None)
-        
+
         # Run the benchmark on the synchronous wrapper
         return benchmark(_sync_wrapper)
 
@@ -88,14 +89,11 @@ async def send_request_with_pre_serialized_json(client, serialized_json):
     """
     # Send the request
     response = await client.post(
-        "/runs", 
-        content=serialized_json,
-        headers={"Content-Type": "application/json"}
+        "/runs", content=serialized_json, headers={"Content-Type": "application/json"}
     )
     return response
 
 
-@pytest.mark.memray(mode="peak")
 def test_create_batch_runs_500_10kb(client, aio_benchmark):
     """
     This excludes the time for run dictionary creation and JSON serialization,
@@ -103,17 +101,18 @@ def test_create_batch_runs_500_10kb(client, aio_benchmark):
     """
     # Create the run dictionaries outside the benchmark
     run_dicts = generate_batch_run_dicts(500, 10)
-    
+
     # Pre-serialize the JSON outside the benchmark
     serialized_json = orjson.dumps(run_dicts)
-    
+
     # Benchmark only the HTTP request with pre-serialized JSON
-    result = aio_benchmark(send_request_with_pre_serialized_json, client, serialized_json)
+    result = aio_benchmark(
+        send_request_with_pre_serialized_json, client, serialized_json
+    )
     assert result.status_code == 201
     assert len(result.json()["run_ids"]) == 500
 
 
-@pytest.mark.memray(mode="peak")
 def test_create_batch_runs_50_100kb(client, aio_benchmark):
     """
     This excludes the time for run dictionary creation and JSON serialization,
@@ -126,6 +125,8 @@ def test_create_batch_runs_50_100kb(client, aio_benchmark):
     serialized_json = orjson.dumps(run_dicts)
 
     # Benchmark only the HTTP request with pre-serialized JSON
-    result = aio_benchmark(send_request_with_pre_serialized_json, client, serialized_json)
+    result = aio_benchmark(
+        send_request_with_pre_serialized_json, client, serialized_json
+    )
     assert result.status_code == 201
     assert len(result.json()["run_ids"]) == 50
