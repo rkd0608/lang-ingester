@@ -25,7 +25,7 @@ def generate_large_json_dict(size_kb=10):
     # Split the string into chunks to create dictionary entries
     chunk_size = 100
     for i in range(0, len(large_string), chunk_size):
-        key = f"key_{i//chunk_size}"
+        key = f"key_{i // chunk_size}"
         result[key] = large_string[i : i + chunk_size]
 
     return result
@@ -94,6 +94,15 @@ async def send_request_with_pre_serialized_json(client, serialized_json):
     return response
 
 
+async def send_get_request(client, run_id):
+    """
+    Send get request.
+    """
+    # Send the request
+    response = await client.get(f"/runs/{run_id}")
+    return response
+
+
 def test_create_batch_runs_500_10kb(client, aio_benchmark):
     """
     This excludes the time for run dictionary creation and JSON serialization,
@@ -130,3 +139,43 @@ def test_create_batch_runs_50_100kb(client, aio_benchmark):
     )
     assert result.status_code == 201
     assert len(result.json()["run_ids"]) == 50
+
+
+def test_get_run_10kb(client, aio_benchmark):
+    """
+    This excludes the time for run insertion, focusing only on the read performance.
+    """
+    # Create the run dictionaries outside the benchmark
+    run_dicts = generate_batch_run_dicts(1, 10)
+
+    # Pre-serialize the JSON outside the benchmark
+    serialized_json = orjson.dumps(run_dicts)
+
+    # Benchmark only the HTTP request with pre-serialized JSON
+    result = asyncio.run(send_request_with_pre_serialized_json(client, serialized_json))
+    assert result.status_code == 201
+    run_id = result.json()["run_ids"][0]
+
+    result = aio_benchmark(send_get_request, client, run_id)
+    assert result.status_code == 200
+    assert result.json()["id"] == run_id
+
+
+def test_get_run_100kb(client, aio_benchmark):
+    """
+    This excludes the time for run insertion, focusing only on the read performance.
+    """
+    # Create the run dictionaries outside the benchmark
+    run_dicts = generate_batch_run_dicts(1, 100)
+
+    # Pre-serialize the JSON outside the benchmark
+    serialized_json = orjson.dumps(run_dicts)
+
+    # Benchmark only the HTTP request with pre-serialized JSON
+    result = asyncio.run(send_request_with_pre_serialized_json(client, serialized_json))
+    assert result.status_code == 201
+    run_id = result.json()["run_ids"][0]
+
+    result = aio_benchmark(send_get_request, client, run_id)
+    assert result.status_code == 200
+    assert result.json()["id"] == run_id
