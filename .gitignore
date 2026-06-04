@@ -177,3 +177,10 @@ cython_debug/
 
 .data
 .benchmarks
+
+# macOS
+.DS_Store
+
+# Local environment files (may contain credentials)
+.env.test
+.env.local
