@@ -37,7 +37,7 @@ async def get_s3_client(request: Request):
     yield request.app.state.s3
 
 
-def serialize_run_with_offsets(run: Run) -> tuple[dict[str, str], bytes, dict[str, tuple[int, int]]]:
+def serialize_run_with_offsets(run: Run) -> tuple[bytes, dict[str, tuple[int, int]]]:
     """Serialize a run once and record the offsets of the JSON field values."""
     run_dict = run.model_dump(mode="json")
     field_bytes = {field: orjson.dumps(value) for field, value in run_dict.items()}
@@ -60,7 +60,7 @@ def serialize_run_with_offsets(run: Run) -> tuple[dict[str, str], bytes, dict[st
 
     run_buffer.extend(b"}")
 
-    return run_dict, bytes(run_buffer), field_offsets
+    return bytes(run_buffer), field_offsets
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -79,18 +79,17 @@ async def create_runs(
         raise HTTPException(status_code=400, detail="No runs provided")
 
     batch_id = str(uuid.uuid4())
-    object_key = f"batches/{batch_id}.json"
-    batch_buffer = bytearray(b"[")
+    object_key = f"batches/{batch_id}.ndjson"
+    batch_buffer = bytearray()
     records = []
 
-    for index, run in enumerate(runs):
-        run_dict, run_bytes, field_offsets = serialize_run_with_offsets(run)
-
-        if index > 0:
-            batch_buffer.extend(b",")
+    for run in runs:
+        run_bytes, field_offsets = serialize_run_with_offsets(run)
 
         run_start = len(batch_buffer)
         batch_buffer.extend(run_bytes)
+        run_end = len(batch_buffer)
+        batch_buffer.extend(b"\n")
 
         field_refs = {}
         for field, (field_start, field_end) in field_offsets.items():
@@ -109,24 +108,36 @@ async def create_runs(
                 field_refs["inputs"],
                 field_refs["outputs"],
                 field_refs["metadata"],
+                object_key,
+                run_start,
+                run_end,
             )
         )
 
-    batch_buffer.extend(b"]")
     batch_data = bytes(batch_buffer)
 
     await s3.put_object(
         Bucket=settings.S3_BUCKET_NAME,
         Key=object_key,
         Body=batch_data,
-        ContentType="application/json",
+        ContentType="application/x-ndjson",
     )
 
     async with db.transaction():
         await db.executemany(
             """
-            INSERT INTO runs (id, trace_id, name, inputs, outputs, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO runs (
+                id,
+                trace_id,
+                name,
+                inputs,
+                outputs,
+                metadata,
+                object_key,
+                object_start,
+                object_end
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             """,
             records,
         )

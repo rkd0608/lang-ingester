@@ -1,5 +1,6 @@
 import uuid
 
+import asyncpg
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -165,3 +166,37 @@ async def test_create_and_get_runs_with_duplicate_field_payloads(client):
         assert run_data["inputs"] == expected_run.inputs
         assert run_data["outputs"] == expected_run.outputs
         assert run_data["metadata"] == expected_run.metadata
+
+
+@pytest.mark.asyncio
+async def test_create_runs_populates_run_slice_columns(client):
+    run = Run(
+        trace_id=uuid.uuid4(),
+        name="Run Slice Check",
+        inputs={"prompt": "Check NDJSON storage"},
+        outputs={"answer": "Stored"},
+        metadata={"model": "gpt-4"},
+    )
+
+    run_dict = run.model_dump()
+    run_dict["id"] = str(run_dict["id"])
+    run_dict["trace_id"] = str(run_dict["trace_id"])
+
+    response = await client.post("/runs", json=[run_dict])
+    assert response.status_code == 201
+    run_id = uuid.UUID(response.json()["run_ids"][0])
+
+    async with app.state.db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT object_key, object_start, object_end
+            FROM runs
+            WHERE id = $1
+            """,
+            run_id,
+        )
+
+    assert row is not None
+    assert row["object_key"].endswith(".ndjson")
+    assert row["object_start"] == 0
+    assert row["object_end"] > row["object_start"]
