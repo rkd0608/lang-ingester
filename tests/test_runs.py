@@ -1,13 +1,22 @@
 import uuid
+
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 
 from ls_py_handler.main import app
 from ls_py_handler.api.routes.runs import Run
 
 
+@pytest_asyncio.fixture
+async def client():
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            yield client
+
+
 @pytest.mark.asyncio
-async def test_create_and_get_run():
+async def test_create_and_get_run(client):
     """
     Test the POST /runs endpoint to create multiple runs
     and the GET /runs/{run_id} endpoint to retrieve them.
@@ -49,36 +58,35 @@ async def test_create_and_get_run():
         run_dict["trace_id"] = str(run_dict["trace_id"])
         run_dicts.append(run_dict)
 
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        # Create the runs
-        response = await client.post("/runs", json=run_dicts)
+    # Create the runs
+    response = await client.post("/runs", json=run_dicts)
 
-        # Check response status and structure
-        assert response.status_code == 201
-        assert "status" in response.json()
-        assert response.json()["status"] == "created"
-        assert "run_ids" in response.json()
+    # Check response status and structure
+    assert response.status_code == 201
+    assert "status" in response.json()
+    assert response.json()["status"] == "created"
+    assert "run_ids" in response.json()
 
-        # Get the returned run IDs
-        run_ids = response.json()["run_ids"]
-        assert len(run_ids) == 3
+    # Get the returned run IDs
+    run_ids = response.json()["run_ids"]
+    assert len(run_ids) == 3
 
-        # Verify we can retrieve each run individually
-        for i, run_id in enumerate(run_ids):
-            get_response = await client.get(f"/runs/{run_id}")
+    # Verify we can retrieve each run individually
+    for i, run_id in enumerate(run_ids):
+        get_response = await client.get(f"/runs/{run_id}")
 
-            # Check response status
-            assert get_response.status_code == 200
+        # Check response status
+        assert get_response.status_code == 200
 
-            # Verify the run data matches what we sent
-            run_data = get_response.json()
-            assert run_data["id"] == run_id
+        # Verify the run data matches what we sent
+        run_data = get_response.json()
+        assert run_data["id"] == run_id
 
-            # Verify run name matches the original
-            expected_name = runs[i].name
-            assert run_data["name"] == expected_name
+        # Verify run name matches the original
+        expected_name = runs[i].name
+        assert run_data["name"] == expected_name
 
-            # Verify inputs, outputs, and metadata match
-            assert run_data["inputs"] == runs[i].inputs
-            assert run_data["outputs"] == runs[i].outputs
-            assert run_data["metadata"] == runs[i].metadata
+        # Verify inputs, outputs, and metadata match
+        assert run_data["inputs"] == runs[i].inputs
+        assert run_data["outputs"] == runs[i].outputs
+        assert run_data["metadata"] == runs[i].metadata
