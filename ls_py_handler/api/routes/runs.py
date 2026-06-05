@@ -10,6 +10,7 @@ from pydantic import UUID4, BaseModel, Field
 from ls_py_handler.config.settings import settings
 
 router = APIRouter(prefix="/runs", tags=["runs"])
+TRACKED_REF_FIELDS = {"inputs", "outputs", "metadata"}
 
 
 class Run(BaseModel):
@@ -36,6 +37,32 @@ async def get_s3_client(request: Request):
     yield request.app.state.s3
 
 
+def serialize_run_with_offsets(run: Run) -> tuple[dict[str, str], bytes, dict[str, tuple[int, int]]]:
+    """Serialize a run once and record the offsets of the JSON field values."""
+    run_dict = run.model_dump(mode="json")
+    field_bytes = {field: orjson.dumps(value) for field, value in run_dict.items()}
+
+    run_buffer = bytearray(b"{")
+    field_offsets: dict[str, tuple[int, int]] = {}
+
+    for index, field in enumerate(run_dict):
+        if index > 0:
+            run_buffer.extend(b",")
+
+        run_buffer.extend(orjson.dumps(field))
+        run_buffer.extend(b":")
+        field_start = len(run_buffer)
+        run_buffer.extend(field_bytes[field])
+        field_end = len(run_buffer)
+
+        if field in TRACKED_REF_FIELDS:
+            field_offsets[field] = (field_start, field_end)
+
+    run_buffer.extend(b"}")
+
+    return run_dict, bytes(run_buffer), field_offsets
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_runs(
     runs: List[Run],
@@ -52,35 +79,27 @@ async def create_runs(
         raise HTTPException(status_code=400, detail="No runs provided")
 
     batch_id = str(uuid.uuid4())
-    run_dicts = [run.model_dump() for run in runs]
-    batch_data = orjson.dumps(run_dicts)
     object_key = f"batches/{batch_id}.json"
-
-    await s3.put_object(
-        Bucket=settings.S3_BUCKET_NAME,
-        Key=object_key,
-        Body=batch_data,
-        ContentType="application/json",
-    )
-
+    batch_buffer = bytearray(b"[")
     records = []
 
-    for i, run in enumerate(runs):
-        run_dict = run_dicts[i]
+    for index, run in enumerate(runs):
+        run_dict, run_bytes, field_offsets = serialize_run_with_offsets(run)
+
+        if index > 0:
+            batch_buffer.extend(b",")
+
+        run_start = len(batch_buffer)
+        batch_buffer.extend(run_bytes)
 
         field_refs = {}
-        for field in ["inputs", "outputs", "metadata"]:
-            field_json_data = orjson.dumps(run_dict.get(field, {}))
-            field_start_in_run = batch_data.find(field_json_data)
-
-            if field_start_in_run != -1:
-                field_start = field_start_in_run
-                field_end = field_start + len(field_json_data)
-                field_refs[
-                    field
-                ] = f"s3://{settings.S3_BUCKET_NAME}/{object_key}#{field_start}:{field_end}/{field}"
-            else:
-                field_refs[field] = ""
+        for field, (field_start, field_end) in field_offsets.items():
+            absolute_start = run_start + field_start
+            absolute_end = run_start + field_end
+            field_refs[field] = (
+                f"s3://{settings.S3_BUCKET_NAME}/{object_key}"
+                f"#{absolute_start}:{absolute_end}/{field}"
+            )
 
         records.append(
             (
@@ -92,6 +111,16 @@ async def create_runs(
                 field_refs["metadata"],
             )
         )
+
+    batch_buffer.extend(b"]")
+    batch_data = bytes(batch_buffer)
+
+    await s3.put_object(
+        Bucket=settings.S3_BUCKET_NAME,
+        Key=object_key,
+        Body=batch_data,
+        ContentType="application/json",
+    )
 
     async with db.transaction():
         await db.executemany(

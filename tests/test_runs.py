@@ -122,3 +122,46 @@ async def test_create_runs_rolls_back_transaction_on_insert_failure():
 
             get_response = await client.get(f"/runs/{duplicate_id}")
             assert get_response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_create_and_get_runs_with_duplicate_field_payloads(client):
+    shared_inputs = {"prompt": "Repeated prompt"}
+    shared_metadata = {"model": "gpt-4", "temperature": 0.7}
+
+    run1 = Run(
+        trace_id=uuid.uuid4(),
+        name="Duplicate Payload Run 1",
+        inputs=shared_inputs,
+        outputs={"answer": "First"},
+        metadata=shared_metadata,
+    )
+    run2 = Run(
+        trace_id=uuid.uuid4(),
+        name="Duplicate Payload Run 2",
+        inputs=shared_inputs,
+        outputs={"answer": "Second"},
+        metadata=shared_metadata,
+    )
+
+    runs = [run1, run2]
+    run_dicts = []
+    for run in runs:
+        run_dict = run.model_dump()
+        run_dict["id"] = str(run_dict["id"])
+        run_dict["trace_id"] = str(run_dict["trace_id"])
+        run_dicts.append(run_dict)
+
+    response = await client.post("/runs", json=run_dicts)
+    assert response.status_code == 201
+
+    for expected_run, run_id in zip(runs, response.json()["run_ids"]):
+        get_response = await client.get(f"/runs/{run_id}")
+        assert get_response.status_code == 200
+
+        run_data = get_response.json()
+        assert run_data["id"] == run_id
+        assert run_data["name"] == expected_run.name
+        assert run_data["inputs"] == expected_run.inputs
+        assert run_data["outputs"] == expected_run.outputs
+        assert run_data["metadata"] == expected_run.metadata
