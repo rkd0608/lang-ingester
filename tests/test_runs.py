@@ -1,6 +1,5 @@
 import uuid
 
-import asyncpg
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -169,7 +168,7 @@ async def test_create_and_get_runs_with_duplicate_field_payloads(client):
 
 
 @pytest.mark.asyncio
-async def test_create_runs_populates_run_slice_columns(client):
+async def test_create_runs_populates_run_slice_columns_without_legacy_refs(client):
     run = Run(
         trace_id=uuid.uuid4(),
         name="Run Slice Check",

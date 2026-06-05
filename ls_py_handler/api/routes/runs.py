@@ -1,4 +1,3 @@
-import asyncio
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -10,7 +9,6 @@ from pydantic import UUID4, BaseModel, Field
 from ls_py_handler.config.settings import settings
 
 router = APIRouter(prefix="/runs", tags=["runs"])
-TRACKED_REF_FIELDS = {"inputs", "outputs", "metadata"}
 
 
 class Run(BaseModel):
@@ -37,30 +35,9 @@ async def get_s3_client(request: Request):
     yield request.app.state.s3
 
 
-def serialize_run_with_offsets(run: Run) -> tuple[bytes, dict[str, tuple[int, int]]]:
-    """Serialize a run once and record the offsets of the JSON field values."""
-    run_dict = run.model_dump(mode="json")
-    field_bytes = {field: orjson.dumps(value) for field, value in run_dict.items()}
-
-    run_buffer = bytearray(b"{")
-    field_offsets: dict[str, tuple[int, int]] = {}
-
-    for index, field in enumerate(run_dict):
-        if index > 0:
-            run_buffer.extend(b",")
-
-        run_buffer.extend(orjson.dumps(field))
-        run_buffer.extend(b":")
-        field_start = len(run_buffer)
-        run_buffer.extend(field_bytes[field])
-        field_end = len(run_buffer)
-
-        if field in TRACKED_REF_FIELDS:
-            field_offsets[field] = (field_start, field_end)
-
-    run_buffer.extend(b"}")
-
-    return bytes(run_buffer), field_offsets
+def serialize_run(run: Run) -> bytes:
+    """Serialize a run as one JSON object."""
+    return orjson.dumps(run.model_dump(mode="json"))
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -72,8 +49,8 @@ async def create_runs(
     """
     Create new runs in batch.
 
-    Takes a JSON array of Run objects, uploads them to MinIO,
-    and stores references to certain fields in PostgreSQL.
+    Takes a JSON array of Run objects, uploads them to MinIO as NDJSON,
+    and stores one object-range index row per run in PostgreSQL.
     """
     if not runs:
         raise HTTPException(status_code=400, detail="No runs provided")
@@ -84,30 +61,18 @@ async def create_runs(
     records = []
 
     for run in runs:
-        run_bytes, field_offsets = serialize_run_with_offsets(run)
+        run_bytes = serialize_run(run)
 
         run_start = len(batch_buffer)
         batch_buffer.extend(run_bytes)
         run_end = len(batch_buffer)
         batch_buffer.extend(b"\n")
 
-        field_refs = {}
-        for field, (field_start, field_end) in field_offsets.items():
-            absolute_start = run_start + field_start
-            absolute_end = run_start + field_end
-            field_refs[field] = (
-                f"s3://{settings.S3_BUCKET_NAME}/{object_key}"
-                f"#{absolute_start}:{absolute_end}/{field}"
-            )
-
         records.append(
             (
                 run.id,
                 run.trace_id,
                 run.name,
-                field_refs["inputs"],
-                field_refs["outputs"],
-                field_refs["metadata"],
                 object_key,
                 run_start,
                 run_end,
@@ -130,14 +95,11 @@ async def create_runs(
                 id,
                 trace_id,
                 name,
-                inputs,
-                outputs,
-                metadata,
                 object_key,
                 object_start,
                 object_end
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6)
             """,
             records,
         )
@@ -157,7 +119,13 @@ async def get_run(
     # Fetch the run from the PG
     row = await db.fetchrow(
         """
-        SELECT id, trace_id, name, inputs, outputs, metadata
+        SELECT
+            id,
+            trace_id,
+            name,
+            object_key,
+            object_start,
+            object_end
         FROM runs
         WHERE id = $1
         """,
@@ -168,61 +136,12 @@ async def get_run(
         raise HTTPException(status_code=404, detail=f"Run with ID {run_id} not found")
 
     run_data = dict(row)
-
-    def parse_s3_ref(ref):
-        if not ref or not ref.startswith("s3://"):
-            return None, None, None, None
-
-        parts = ref.split("/")
-        bucket = parts[2]
-        key = "/".join(parts[3:]).split("#")[0]
-
-        if "#" in ref:
-            offset_part = ref.split("#")[1]
-            if ":" in offset_part and "/" in offset_part:
-                offsets, field = offset_part.split("/")
-                start_offset, end_offset = map(int, offsets.split(":"))
-                return bucket, key, (start_offset, end_offset), field
-
-        return bucket, key, None, None
-
-    async def fetch_from_s3(ref):
-        if not ref or not ref.startswith("s3://"):
-            return {}
-
-        bucket, key, offsets, field = parse_s3_ref(ref)
-        if not bucket or not key or not offsets:
-            return {}
-
-        start_offset, end_offset = offsets
-        byte_range = f"bytes={start_offset}-{end_offset-1}"
-
-        try:
-            response = await s3.get_object(Bucket=bucket, Key=key, Range=byte_range)
-            async with response["Body"] as stream:
-                data = await stream.read()
-            try:
-                return orjson.loads(data)
-            except Exception as parse_error:
-                print(f"Error parsing JSON fragment: {parse_error}")
-                print(f"Problematic data: {data}")
-                return {}
-
-        except Exception as e:
-            print(f"Error fetching S3 object with range: {e}")
-            return {}
-
-    inputs, outputs, metadata = await asyncio.gather(
-        fetch_from_s3(run_data["inputs"]),
-        fetch_from_s3(run_data["outputs"]),
-        fetch_from_s3(run_data["metadata"]),
+    byte_range = f"bytes={run_data['object_start']}-{run_data['object_end'] - 1}"
+    response = await s3.get_object(
+        Bucket=settings.S3_BUCKET_NAME,
+        Key=run_data["object_key"],
+        Range=byte_range,
     )
-
-    return {
-        "id": str(run_data["id"]),
-        "trace_id": str(run_data["trace_id"]),
-        "name": run_data["name"],
-        "inputs": inputs,
-        "outputs": outputs,
-        "metadata": metadata,
-    }
+    async with response["Body"] as stream:
+        data = await stream.read()
+    return orjson.loads(data)
