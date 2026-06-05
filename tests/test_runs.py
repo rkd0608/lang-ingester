@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 
 from ls_py_handler.main import app
 from ls_py_handler.api.routes.runs import Run
@@ -90,3 +90,35 @@ async def test_create_and_get_run(client):
         assert run_data["inputs"] == runs[i].inputs
         assert run_data["outputs"] == runs[i].outputs
         assert run_data["metadata"] == runs[i].metadata
+
+
+@pytest.mark.asyncio
+async def test_create_runs_rolls_back_transaction_on_insert_failure():
+    duplicate_id = uuid.uuid4()
+    runs = [
+        {
+            "id": str(duplicate_id),
+            "trace_id": str(uuid.uuid4()),
+            "name": "Test Run 1",
+            "inputs": {"prompt": "Prompt 1"},
+            "outputs": {"answer": "Answer 1"},
+            "metadata": {"model": "gpt-4"},
+        },
+        {
+            "id": str(duplicate_id),
+            "trace_id": str(uuid.uuid4()),
+            "name": "Test Run 2",
+            "inputs": {"prompt": "Prompt 2"},
+            "outputs": {"answer": "Answer 2"},
+            "metadata": {"model": "gpt-4"},
+        },
+    ]
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/runs", json=runs)
+            assert response.status_code == 500
+
+            get_response = await client.get(f"/runs/{duplicate_id}")
+            assert get_response.status_code == 404

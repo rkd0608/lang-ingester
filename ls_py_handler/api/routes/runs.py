@@ -63,7 +63,7 @@ async def create_runs(
         ContentType="application/json",
     )
 
-    inserted_ids = []
+    records = []
 
     for i, run in enumerate(runs):
         run_dict = run_dicts[i]
@@ -82,22 +82,27 @@ async def create_runs(
             else:
                 field_refs[field] = ""
 
-        run_id = await db.fetchval(
+        records.append(
+            (
+                run.id,
+                run.trace_id,
+                run.name,
+                field_refs["inputs"],
+                field_refs["outputs"],
+                field_refs["metadata"],
+            )
+        )
+
+    async with db.transaction():
+        await db.executemany(
             """
             INSERT INTO runs (id, trace_id, name, inputs, outputs, metadata)
             VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id
             """,
-            run.id,
-            run.trace_id,
-            run.name,
-            field_refs["inputs"],
-            field_refs["outputs"],
-            field_refs["metadata"],
+            records,
         )
-        inserted_ids.append(str(run_id))
 
-    return {"status": "created", "run_ids": inserted_ids}
+    return {"status": "created", "run_ids": [str(run.id) for run in runs]}
 
 
 @router.get("/{run_id}", status_code=status.HTTP_200_OK)
