@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     S3_SECRET_KEY: str = "minioadmin1"
     S3_REGION: str = "us-east-1"
 
+    # Redis settings
+    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_CACHE_ENABLED: bool = True
+    REDIS_CACHE_TTL_SECONDS: int = 300
+    REDIS_CACHE_KEY_PREFIX: str = "run"
+    REDIS_CACHE_MAX_PAYLOAD_BYTES: int = 262144
+
     # Configure pydantic to read from .env file
     model_config = SettingsConfigDict(
         env_file=".env",

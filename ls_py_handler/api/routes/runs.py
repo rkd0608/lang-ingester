@@ -35,9 +35,24 @@ async def get_s3_client(request: Request):
     yield request.app.state.s3
 
 
+async def get_redis_client(request: Request):
+    """Return the shared Redis client."""
+    yield request.app.state.redis
+
+
 def serialize_run(run: Run) -> bytes:
     """Serialize a run as one JSON object."""
     return orjson.dumps(run.model_dump(mode="json"))
+
+
+def run_cache_key(run_id: UUID4) -> str:
+    """Build the Redis cache key for a run."""
+    return f"{settings.REDIS_CACHE_KEY_PREFIX}:{run_id}"
+
+
+def should_cache_payload(payload: bytes) -> bool:
+    """Return whether a serialized run payload should be cached."""
+    return len(payload) <= settings.REDIS_CACHE_MAX_PAYLOAD_BYTES
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -112,11 +127,19 @@ async def get_run(
     run_id: UUID4,
     db: asyncpg.Connection = Depends(get_db_conn),
     s3: Any = Depends(get_s3_client),
+    redis: Any = Depends(get_redis_client),
 ):
     """
     Get a run by its ID.
     """
-    # Fetch the run from the PG
+    if settings.REDIS_CACHE_ENABLED and redis is not None:
+        try:
+            cached_data = await redis.get(run_cache_key(run_id))
+            if cached_data is not None:
+                return orjson.loads(cached_data)
+        except Exception:
+            pass
+
     row = await db.fetchrow(
         """
         SELECT
@@ -144,4 +167,15 @@ async def get_run(
     )
     async with response["Body"] as stream:
         data = await stream.read()
+
+    if settings.REDIS_CACHE_ENABLED and redis is not None and should_cache_payload(data):
+        try:
+            await redis.set(
+                run_cache_key(run_id),
+                data,
+                ex=settings.REDIS_CACHE_TTL_SECONDS,
+            )
+        except Exception:
+            pass
+
     return orjson.loads(data)
