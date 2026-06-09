@@ -145,6 +145,26 @@ async def test_create_runs_rolls_back_transaction_on_insert_failure():
 
 
 @pytest.mark.asyncio
+async def test_create_runs_rejects_invalid_json_payload(client):
+    response = await client.post(
+        "/runs",
+        content=b'[{"trace_id":',
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid JSON payload"
+
+
+@pytest.mark.asyncio
+async def test_create_runs_rejects_invalid_run_shape(client):
+    response = await client.post(
+        "/runs",
+        json=[{"name": "Missing trace_id"}],
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_create_and_get_runs_with_duplicate_field_payloads(client):
     shared_inputs = {"prompt": "Repeated prompt"}
     shared_metadata = {"model": "gpt-4", "temperature": 0.7}
