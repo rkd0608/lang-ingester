@@ -1,6 +1,6 @@
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import asyncpg
 import ijson
@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import UUID4, BaseModel, Field, ValidationError
 
 from ls_py_handler.config.settings import settings
+from ls_py_handler.utils.connection_utils import get_s3_client, get_db_conn, get_redis_client
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -24,7 +25,7 @@ class Run(BaseModel):
 
 
 class AsyncRequestStreamReader:
-    """Adapt Starlette's async request stream to a file-like async reader."""
+    """Adapt async request stream to a file-like async reader."""
 
     def __init__(self, stream: AsyncIterator[bytes]):
         self._stream = stream.__aiter__()
@@ -61,25 +62,6 @@ class AsyncRequestStreamReader:
         del self._buffer[:size]
         return data
 
-
-async def get_db_conn(request: Request):
-    """Borrow a database connection from the shared pool."""
-    pool = request.app.state.db_pool
-    conn = await pool.acquire()
-    try:
-        yield conn
-    finally:
-        await pool.release(conn)
-
-
-async def get_s3_client(request: Request):
-    """Return the shared S3 client."""
-    yield request.app.state.s3
-
-
-async def get_redis_client(request: Request):
-    """Return the shared Redis client."""
-    yield request.app.state.redis
 
 
 def serialize_run(run: Run) -> bytes:
@@ -202,7 +184,7 @@ async def get_run(
             if cached_data is not None:
                 return orjson.loads(cached_data)
         except Exception:
-            pass
+            print("Failed to retrieve cached run data")
 
     row = await db.fetchrow(
         """
@@ -240,6 +222,6 @@ async def get_run(
                 ex=settings.REDIS_CACHE_TTL_SECONDS,
             )
         except Exception:
-            pass
+            print("Failed to cache run data")
 
     return orjson.loads(data)
