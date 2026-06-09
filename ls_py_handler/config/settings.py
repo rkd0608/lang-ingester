@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     S3_ACCESS_KEY: str = "minioadmin1"
     S3_SECRET_KEY: str = "minioadmin1"
     S3_REGION: str = "us-east-1"
+    S3_MULTIPART_PART_SIZE_BYTES: int = 8 * 1024 * 1024
 
     # Redis settings
     REDIS_URL: str = "redis://localhost:6379/0"

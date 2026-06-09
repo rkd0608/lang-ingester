@@ -55,6 +55,93 @@ def should_cache_payload(payload: bytes) -> bool:
     return len(payload) <= settings.REDIS_CACHE_MAX_PAYLOAD_BYTES
 
 
+async def upload_multipart_batch(
+    runs: List[Run],
+    object_key: str,
+    s3: Any,
+) -> List[tuple[UUID4, UUID4, str, str, int, int]]:
+    """Upload a batch object via multipart upload and return DB index records."""
+    records = []
+    current_offset = 0
+    part_number = 1
+    part_buffer = bytearray()
+    uploaded_parts = []
+    upload_id = None
+
+    async def flush_part() -> None:
+        nonlocal part_number
+        if not part_buffer:
+            return
+
+        response = await s3.upload_part(
+            Bucket=settings.S3_BUCKET_NAME,
+            Key=object_key,
+            PartNumber=part_number,
+            UploadId=upload_id,
+            Body=bytes(part_buffer),
+        )
+        uploaded_parts.append(
+            {
+                "ETag": response["ETag"],
+                "PartNumber": part_number,
+            }
+        )
+        part_number += 1
+        part_buffer.clear()
+
+    try:
+        response = await s3.create_multipart_upload(
+            Bucket=settings.S3_BUCKET_NAME,
+            Key=object_key,
+            ContentType="application/x-ndjson",
+        )
+        upload_id = response["UploadId"]
+
+        for run in runs:
+            run_bytes = serialize_run(run)
+            run_start = current_offset
+            run_end = run_start + len(run_bytes)
+
+            part_buffer.extend(run_bytes)
+            part_buffer.extend(b"\n")
+            current_offset = run_end + 1
+
+            records.append(
+                (
+                    run.id,
+                    run.trace_id,
+                    run.name,
+                    object_key,
+                    run_start,
+                    run_end,
+                )
+            )
+
+            if len(part_buffer) >= settings.S3_MULTIPART_PART_SIZE_BYTES:
+                await flush_part()
+
+        await flush_part()
+        await s3.complete_multipart_upload(
+            Bucket=settings.S3_BUCKET_NAME,
+            Key=object_key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": uploaded_parts},
+        )
+    except Exception:
+        if upload_id is not None:
+            try:
+                await s3.abort_multipart_upload(
+                    Bucket=settings.S3_BUCKET_NAME,
+                    Key=object_key,
+                    UploadId=upload_id,
+                )
+            except Exception:
+                pass
+        raise
+
+    return records
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_runs(
     runs: List[Run],
@@ -72,52 +159,30 @@ async def create_runs(
 
     batch_id = str(uuid.uuid4())
     object_key = f"batches/{batch_id}.ndjson"
-    batch_buffer = bytearray()
-    records = []
+    records = await upload_multipart_batch(runs, object_key, s3)
 
-    for run in runs:
-        run_bytes = serialize_run(run)
-
-        run_start = len(batch_buffer)
-        batch_buffer.extend(run_bytes)
-        run_end = len(batch_buffer)
-        batch_buffer.extend(b"\n")
-
-        records.append(
-            (
-                run.id,
-                run.trace_id,
-                run.name,
-                object_key,
-                run_start,
-                run_end,
+    try:
+        async with db.transaction():
+            await db.executemany(
+                """
+                INSERT INTO runs (
+                    id,
+                    trace_id,
+                    name,
+                    object_key,
+                    object_start,
+                    object_end
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                records,
             )
-        )
-
-    batch_data = bytes(batch_buffer)
-
-    await s3.put_object(
-        Bucket=settings.S3_BUCKET_NAME,
-        Key=object_key,
-        Body=batch_data,
-        ContentType="application/x-ndjson",
-    )
-
-    async with db.transaction():
-        await db.executemany(
-            """
-            INSERT INTO runs (
-                id,
-                trace_id,
-                name,
-                object_key,
-                object_start,
-                object_end
-            )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            """,
-            records,
-        )
+    except Exception:
+        try:
+            await s3.delete_object(Bucket=settings.S3_BUCKET_NAME, Key=object_key)
+        except Exception:
+            pass
+        raise
 
     return {"status": "created", "run_ids": [str(run.id) for run in runs]}
 
