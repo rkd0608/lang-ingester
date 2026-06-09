@@ -3,6 +3,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 import asyncpg
 from aiobotocore.session import get_session
 from fastapi import FastAPI
+from redis.asyncio import Redis
 
 from ls_py_handler.api.routes.runs import router as runs_router
 from ls_py_handler.config.settings import settings
@@ -12,6 +13,9 @@ async def lifespan(app: FastAPI):
     """Initialize and share application resources for the app lifetime."""
     exit_stack = AsyncExitStack()
     session = get_session()
+    redis_client = None
+    if settings.REDIS_CACHE_ENABLED:
+        redis_client = Redis.from_url(settings.REDIS_URL)
     s3 = await exit_stack.enter_async_context(
         session.create_client(
             "s3",
@@ -31,6 +35,7 @@ async def lifespan(app: FastAPI):
 
     app.state.s3 = s3
     app.state.db_pool = db_pool
+    app.state.redis = redis_client
 
     try:
         await s3.create_bucket(Bucket=settings.S3_BUCKET_NAME)
@@ -38,9 +43,18 @@ async def lifespan(app: FastAPI):
     except Exception:
         print("Tried to create S3 bucket, but it already exists. No action taken.")
 
+    if redis_client is not None:
+        try:
+            await redis_client.ping()
+            print("Redis connection established.")
+        except Exception:
+            print("Redis ping failed during startup. Continuing without a warm cache.")
+
     try:
         yield
     finally:
+        if redis_client is not None:
+            await redis_client.aclose()
         await db_pool.close()
         await exit_stack.aclose()
 
