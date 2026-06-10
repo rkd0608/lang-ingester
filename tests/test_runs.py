@@ -165,6 +165,20 @@ async def test_create_runs_rejects_invalid_run_shape(client):
 
 
 @pytest.mark.asyncio
+async def test_openapi_documents_json_array_request_body(client):
+    response = await client.get("/openapi.json")
+    assert response.status_code == 200
+
+    request_body = response.json()["paths"]["/runs"]["post"]["requestBody"]
+    assert request_body["required"] is True
+    assert "application/json" in request_body["content"]
+
+    schema = request_body["content"]["application/json"]["schema"]
+    assert schema["type"] == "array"
+    assert schema["items"]["title"] == "Run"
+
+
+@pytest.mark.asyncio
 async def test_create_and_get_runs_with_duplicate_field_payloads(client):
     shared_inputs = {"prompt": "Repeated prompt"}
     shared_metadata = {"model": "gpt-4", "temperature": 0.7}

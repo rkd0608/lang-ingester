@@ -24,6 +24,13 @@ class Run(BaseModel):
     metadata: Dict[str, Any] = {}
 
 
+RUN_REQUEST_BODY_SCHEMA = {
+    "type": "array",
+    "items": Run.model_json_schema(),
+    "title": "Runs",
+}
+
+
 class AsyncRequestStreamReader:
     """Adapt async request stream to a file-like async reader."""
 
@@ -104,7 +111,20 @@ async def iter_runs_from_request(request: Request) -> AsyncIterator[Run]:
         raise HTTPException(status_code=400, detail="No runs provided")
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    status_code=status.HTTP_201_CREATED,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": RUN_REQUEST_BODY_SCHEMA,
+                }
+            },
+        }
+    },
+)
 async def create_runs(
     request: Request,
     db: asyncpg.Connection = Depends(get_db_conn),
@@ -205,7 +225,9 @@ async def get_run(
         raise HTTPException(status_code=404, detail=f"Run with ID {run_id} not found")
 
     run_data = dict(row)
-    byte_range = f"bytes={run_data['object_start']}-{run_data['object_end'] - 1}"
+    start = int(run_data["object_start"])
+    end = int(run_data["object_end"])
+    byte_range = f"bytes={start}-{end - 1}"
     response = await s3.get_object(
         Bucket=settings.S3_BUCKET_NAME,
         Key=run_data["object_key"],
