@@ -1,4 +1,4 @@
-# ls-py-handler
+# langsmith-py-handler
 
 A simple FastAPI server with endpoints for ingesting and fetching runs.
 
