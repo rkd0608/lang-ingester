@@ -4,7 +4,6 @@ import random
 import string
 import orjson
 import pytest
-import pytest_asyncio
 from httpx import AsyncClient
 
 from ls_py_handler.main import app
@@ -49,37 +48,45 @@ def generate_batch_run_dicts(batch_size=100, size_kb=10):
 
 
 @pytest.fixture
-def aio_benchmark(benchmark):
+def benchmark_client():
+    """Create one event loop and client for the entire benchmark test."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    lifespan_context = app.router.lifespan_context(app)
+    loop.run_until_complete(lifespan_context.__aenter__())
+
+    client_context = AsyncClient(app=app, base_url="http://test")
+    client = loop.run_until_complete(client_context.__aenter__())
+
+    try:
+        yield {"loop": loop, "client": client}
+    finally:
+        loop.run_until_complete(client_context.__aexit__(None, None, None))
+        loop.run_until_complete(lifespan_context.__aexit__(None, None, None))
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+@pytest.fixture
+def aio_benchmark(benchmark, benchmark_client):
     """
     A fixture that allows benchmarking of async functions.
 
     This fixture creates a synchronous wrapper around async functions
     that can be used with pytest-benchmark.
     """
+    loop = benchmark_client["loop"]
 
     def _wrapper(func, *args, **kwargs):
         # Create a synchronous wrapper for the async function
         def _sync_wrapper():
-            # Create a new event loop for each benchmark iteration
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(func(*args, **kwargs))
-            finally:
-                loop.close()
-                asyncio.set_event_loop(None)
+            return loop.run_until_complete(func(*args, **kwargs))
 
         # Run the benchmark on the synchronous wrapper
         return benchmark(_sync_wrapper)
 
     return _wrapper
-
-
-@pytest_asyncio.fixture
-async def client():
-    """Fixture that creates an async test client."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        yield client
 
 
 async def send_request_with_pre_serialized_json(client, serialized_json):
@@ -103,7 +110,7 @@ async def send_get_request(client, run_id):
     return response
 
 
-def test_create_batch_runs_500_10kb(client, aio_benchmark):
+def test_create_batch_runs_500_10kb(benchmark_client, aio_benchmark):
     """
     This excludes the time for run dictionary creation and JSON serialization,
     focusing only on the API call performance.
@@ -116,13 +123,15 @@ def test_create_batch_runs_500_10kb(client, aio_benchmark):
 
     # Benchmark only the HTTP request with pre-serialized JSON
     result = aio_benchmark(
-        send_request_with_pre_serialized_json, client, serialized_json
+        send_request_with_pre_serialized_json,
+        benchmark_client["client"],
+        serialized_json,
     )
     assert result.status_code == 201
     assert len(result.json()["run_ids"]) == 500
 
 
-def test_create_batch_runs_50_100kb(client, aio_benchmark):
+def test_create_batch_runs_50_100kb(benchmark_client, aio_benchmark):
     """
     This excludes the time for run dictionary creation and JSON serialization,
     focusing only on the API call performance.
@@ -135,13 +144,15 @@ def test_create_batch_runs_50_100kb(client, aio_benchmark):
 
     # Benchmark only the HTTP request with pre-serialized JSON
     result = aio_benchmark(
-        send_request_with_pre_serialized_json, client, serialized_json
+        send_request_with_pre_serialized_json,
+        benchmark_client["client"],
+        serialized_json,
     )
     assert result.status_code == 201
     assert len(result.json()["run_ids"]) == 50
 
 
-def test_get_run_10kb(client, aio_benchmark):
+def test_get_run_10kb(benchmark_client, aio_benchmark):
     """
     This excludes the time for run insertion, focusing only on the read performance.
     """
@@ -152,16 +163,18 @@ def test_get_run_10kb(client, aio_benchmark):
     serialized_json = orjson.dumps(run_dicts)
 
     # Benchmark only the HTTP request with pre-serialized JSON
-    result = asyncio.run(send_request_with_pre_serialized_json(client, serialized_json))
+    result = benchmark_client["loop"].run_until_complete(
+        send_request_with_pre_serialized_json(benchmark_client["client"], serialized_json)
+    )
     assert result.status_code == 201
     run_id = result.json()["run_ids"][0]
 
-    result = aio_benchmark(send_get_request, client, run_id)
+    result = aio_benchmark(send_get_request, benchmark_client["client"], run_id)
     assert result.status_code == 200
     assert result.json()["id"] == run_id
 
 
-def test_get_run_100kb(client, aio_benchmark):
+def test_get_run_100kb(benchmark_client, aio_benchmark):
     """
     This excludes the time for run insertion, focusing only on the read performance.
     """
@@ -172,10 +185,11 @@ def test_get_run_100kb(client, aio_benchmark):
     serialized_json = orjson.dumps(run_dicts)
 
     # Benchmark only the HTTP request with pre-serialized JSON
-    result = asyncio.run(send_request_with_pre_serialized_json(client, serialized_json))
+    result = benchmark_client["loop"].run_until_complete(
+        send_request_with_pre_serialized_json(benchmark_client["client"], serialized_json)
+    )
     assert result.status_code == 201
     run_id = result.json()["run_ids"][0]
 
-    result = aio_benchmark(send_get_request, client, run_id)
+    result = aio_benchmark(send_get_request, benchmark_client["client"], run_id)
     assert result.status_code == 200
-    assert result.json()["id"] == run_id

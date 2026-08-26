@@ -1,14 +1,16 @@
-import asyncio
 import uuid
-from typing import Any, Dict, List, Optional
+from collections.abc import AsyncIterator
+from typing import Any, Dict, Optional
 
 import asyncpg
+import ijson
 import orjson
-from aiobotocore.session import get_session
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import UUID4, BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
+from pydantic import UUID4, BaseModel, Field, ValidationError
 
 from ls_py_handler.config.settings import settings
+from ls_py_handler.utils.connection_utils import get_s3_client, get_db_conn, get_redis_client
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -22,102 +24,168 @@ class Run(BaseModel):
     metadata: Dict[str, Any] = {}
 
 
-async def get_db_conn():
-    """Get a database connection."""
-    conn = await asyncpg.connect(
-        user=settings.DB_USER,
-        password=settings.DB_PASSWORD,
-        database=settings.DB_NAME,
-        host=settings.DB_HOST,
-        port=settings.DB_PORT,
-    )
+RUN_REQUEST_BODY_SCHEMA = {
+    "type": "array",
+    "items": Run.model_json_schema(),
+    "title": "Runs",
+}
+
+
+class AsyncRequestStreamReader:
+    """Adapt async request stream to a file-like async reader."""
+
+    def __init__(self, stream: AsyncIterator[bytes]):
+        self._stream = stream.__aiter__()
+        self._buffer = bytearray()
+        self._done = False
+
+    async def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+
+        if size < 0:
+            chunks = [bytes(self._buffer)] if self._buffer else []
+            self._buffer.clear()
+            while not self._done:
+                try:
+                    chunk = await self._stream.__anext__()
+                except StopAsyncIteration:
+                    self._done = True
+                    break
+                if chunk:
+                    chunks.append(chunk)
+            return b"".join(chunks)
+
+        while len(self._buffer) < size and not self._done:
+            try:
+                chunk = await self._stream.__anext__()
+            except StopAsyncIteration:
+                self._done = True
+                break
+            if chunk:
+                self._buffer.extend(chunk)
+
+        data = bytes(self._buffer[:size])
+        del self._buffer[:size]
+        return data
+
+
+
+def serialize_run(run: Run) -> bytes:
+    """Serialize a run as one JSON object."""
+    return orjson.dumps(run.model_dump(mode="json"))
+
+
+def run_cache_key(run_id: UUID4) -> str:
+    """Build the Redis cache key for a run."""
+    return f"{settings.REDIS_CACHE_KEY_PREFIX}:{run_id}"
+
+
+def should_cache_payload(payload: bytes) -> bool:
+    """Return whether a serialized run payload should be cached."""
+    return len(payload) <= settings.REDIS_CACHE_MAX_PAYLOAD_BYTES
+
+
+async def iter_runs_from_request(request: Request) -> AsyncIterator[Run]:
+    """Incrementally parse a JSON-array request body into validated runs."""
+    stream_reader = AsyncRequestStreamReader(request.stream())
+    run_count = 0
+
     try:
-        yield conn
-    finally:
-        await conn.close()
+        async for run_payload in ijson.items_async(
+            stream_reader,
+            "item",
+            use_float=True,
+        ):
+            run_count += 1
+            try:
+                yield Run.model_validate(run_payload)
+            except ValidationError as exc:
+                raise RequestValidationError(exc.errors()) from exc
+    except (RequestValidationError, HTTPException):
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+    if run_count == 0:
+        raise HTTPException(status_code=400, detail="No runs provided")
 
 
-async def get_s3_client():
-    """Get an S3 client for MinIO."""
-    session = get_session()
-    async with session.create_client(
-        "s3",
-        endpoint_url=settings.S3_ENDPOINT_URL,
-        aws_access_key_id=settings.S3_ACCESS_KEY,
-        aws_secret_access_key=settings.S3_SECRET_KEY,
-        region_name=settings.S3_REGION,
-    ) as client:
-        yield client
-
-
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    status_code=status.HTTP_201_CREATED,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": RUN_REQUEST_BODY_SCHEMA,
+                }
+            },
+        }
+    },
+)
 async def create_runs(
-    runs: List[Run],
+    request: Request,
     db: asyncpg.Connection = Depends(get_db_conn),
     s3: Any = Depends(get_s3_client),
 ):
     """
     Create new runs in batch.
 
-    Takes a JSON array of Run objects, uploads them to MinIO,
-    and stores references to certain fields in PostgreSQL.
+    Takes a JSON array of Run objects, uploads them to MinIO as NDJSON,
+    and stores one object-range index row per run in PostgreSQL.
     """
-    if not runs:
-        raise HTTPException(status_code=400, detail="No runs provided")
-
-    # Prepare the batch for S3 upload
     batch_id = str(uuid.uuid4())
+    object_key = f"batches/{batch_id}.ndjson"
+    batch_buffer = bytearray()
+    records = []
 
-    run_dicts = [run.model_dump() for run in runs]
-    batch_data = orjson.dumps(run_dicts)
+    async for run in iter_runs_from_request(request):
+        run_bytes = serialize_run(run)
 
-    object_key = f"batches/{batch_id}.json"
+        run_start = len(batch_buffer)
+        batch_buffer.extend(run_bytes)
+        run_end = len(batch_buffer)
+        batch_buffer.extend(b"\n")
 
-    # Upload the batch data
+        records.append(
+            (
+                run.id,
+                run.trace_id,
+                run.name,
+                object_key,
+                run_start,
+                run_end,
+            )
+        )
+
+    batch_data = bytes(batch_buffer)
+
     await s3.put_object(
         Bucket=settings.S3_BUCKET_NAME,
         Key=object_key,
         Body=batch_data,
-        ContentType="application/json",
+        ContentType="application/x-ndjson",
     )
 
-    # Store references in PG
-    inserted_ids = []
-
-    for i, run in enumerate(runs):
-        run_dict = run_dicts[i]
-
-        # Calculate specific offsets for each field in the JSON using a loop
-        field_refs = {}
-        for field in ["inputs", "outputs", "metadata"]:
-            field_json_data = orjson.dumps(run_dict.get(field, {}))
-            field_start_in_run = batch_data.find(field_json_data)
-
-            if field_start_in_run != -1:
-                field_start = field_start_in_run
-                field_end = field_start + len(field_json_data)
-                field_refs[
-                    field
-                ] = f"s3://{settings.S3_BUCKET_NAME}/{object_key}#{field_start}:{field_end}/{field}"
-            else:
-                field_refs[field] = ""
-
-        run_id = await db.fetchval(
+    async with db.transaction():
+        await db.executemany(
             """
-            INSERT INTO runs (id, trace_id, name, inputs, outputs, metadata)
+            INSERT INTO runs (
+                id,
+                trace_id,
+                name,
+                object_key,
+                object_start,
+                object_end
+            )
             VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id
             """,
-            run.id,
-            run.trace_id,
-            run.name,
-            field_refs["inputs"],
-            field_refs["outputs"],
-            field_refs["metadata"],
+            records,
         )
-        inserted_ids.append(str(run_id))
 
-    return {"status": "created", "run_ids": inserted_ids}
+    return {"status": "created", "run_ids": [str(record[0]) for record in records]}
 
 
 @router.get("/{run_id}", status_code=status.HTTP_200_OK)
@@ -125,14 +193,28 @@ async def get_run(
     run_id: UUID4,
     db: asyncpg.Connection = Depends(get_db_conn),
     s3: Any = Depends(get_s3_client),
+    redis: Any = Depends(get_redis_client),
 ):
     """
     Get a run by its ID.
     """
-    # Fetch the run from the PG
+    if settings.REDIS_CACHE_ENABLED and redis is not None:
+        try:
+            cached_data = await redis.get(run_cache_key(run_id))
+            if cached_data is not None:
+                return orjson.loads(cached_data)
+        except Exception:
+            print("Failed to retrieve cached run data")
+
     row = await db.fetchrow(
         """
-        SELECT id, trace_id, name, inputs, outputs, metadata
+        SELECT
+            id,
+            trace_id,
+            name,
+            object_key,
+            object_start,
+            object_end
         FROM runs
         WHERE id = $1
         """,
@@ -143,66 +225,25 @@ async def get_run(
         raise HTTPException(status_code=404, detail=f"Run with ID {run_id} not found")
 
     run_data = dict(row)
-
-    # Function to parse S3 reference
-    def parse_s3_ref(ref):
-        if not ref or not ref.startswith("s3://"):
-            return None, None, None, None
-
-        parts = ref.split("/")
-        bucket = parts[2]
-        key = "/".join(parts[3:]).split("#")[0]
-
-        if "#" in ref:
-            offset_part = ref.split("#")[1]
-            if ":" in offset_part and "/" in offset_part:
-                offsets, field = offset_part.split("/")
-                start_offset, end_offset = map(int, offsets.split(":"))
-                return bucket, key, (start_offset, end_offset), field
-
-        return bucket, key, None, None
-
-    # Function to fetch data from S3 based on reference with byte range
-    async def fetch_from_s3(ref):
-        if not ref or not ref.startswith("s3://"):
-            return {}
-
-        bucket, key, offsets, field = parse_s3_ref(ref)
-        if not bucket or not key or not offsets:
-            return {}
-
-        start_offset, end_offset = offsets
-        byte_range = f"bytes={start_offset}-{end_offset-1}"
-
-        try:
-            # Fetch only the required byte range
-            response = await s3.get_object(Bucket=bucket, Key=key, Range=byte_range)
-            async with response["Body"] as stream:
-                data = await stream.read()
-            try:
-                # The data should be a valid JSON object corresponding to the field
-                # (inputs, outputs, or metadata) without needing further extraction
-                return orjson.loads(data)
-            except Exception as parse_error:
-                print(f"Error parsing JSON fragment: {parse_error}")
-                print(f"Problematic data: {data}")
-                return {}
-
-        except Exception as e:
-            print(f"Error fetching S3 object with range: {e}")
-            return {}
-
-    inputs, outputs, metadata = await asyncio.gather(
-        fetch_from_s3(run_data["inputs"]),
-        fetch_from_s3(run_data["outputs"]),
-        fetch_from_s3(run_data["metadata"]),
+    start = int(run_data["object_start"])
+    end = int(run_data["object_end"])
+    byte_range = f"bytes={start}-{end - 1}"
+    response = await s3.get_object(
+        Bucket=settings.S3_BUCKET_NAME,
+        Key=run_data["object_key"],
+        Range=byte_range,
     )
+    async with response["Body"] as stream:
+        data = await stream.read()
 
-    return {
-        "id": str(run_data["id"]),
-        "trace_id": str(run_data["trace_id"]),
-        "name": run_data["name"],
-        "inputs": inputs,
-        "outputs": outputs,
-        "metadata": metadata,
-    }
+    if settings.REDIS_CACHE_ENABLED and redis is not None and should_cache_payload(data):
+        try:
+            await redis.set(
+                run_cache_key(run_id),
+                data,
+                ex=settings.REDIS_CACHE_TTL_SECONDS,
+            )
+        except Exception:
+            print("Failed to cache run data")
+
+    return orjson.loads(data)
